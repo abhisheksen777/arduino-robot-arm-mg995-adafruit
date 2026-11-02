@@ -4,7 +4,7 @@ Fork of [EbenKouao/arduino-robot-arm](https://github.com/EbenKouao/arduino-robot
 
 Wiring overview: [`block-diagrams/mg995-base-servo-wiring.svg`](block-diagrams/mg995-base-servo-wiring.svg) (hand-drawn schematic; the original Fritzing diagrams still show the old stepper build).
 
-> **Status:** the firmware compiles for an Arduino Uno (checked against a stub of the library API). **Nothing here has been tested on physical hardware.** Treat all calibration values as unverified until you have run the calibration sketch.
+> **Status:** the firmware compiles for an Arduino Uno (checked against the real Adafruit PWM Servo Driver Library 3.0.3 with `arduino-cli`). **Nothing here has been tested on physical hardware.** Treat all calibration values as unverified until you have run the calibration sketch.
 
 ## 1. Overview
 
@@ -25,7 +25,7 @@ An Arduino Uno drives six servos (one per joint) through a PCA9685 (I2C) and rec
 
 - Arduino Uno
 - PCA9685 16-channel PWM driver (Hobby Components HCMODU0097 / compatible, address 0x40)
-- HCPCA9685 Arduino library (Hobby Components). Install it before compiling.
+- Adafruit PWM Servo Driver Library (Arduino Library Manager). Install it before compiling.
 - MG995 servo (base) + 5 other servos (shoulder, elbow, wrist 1, wrist 2, gripper)
 - HC-05 Bluetooth module (breakout with onboard regulator)
 - 1 kΩ and 2 kΩ resistors (HC-05 RXD divider)
@@ -113,41 +113,75 @@ The HC-05 RXD pin is a 3.3 V logic input; the Arduino TX is 5 V. The divider giv
 | `P` / `p` | Shoulder up / down | `F` / `f` | Gripper open / close |
 | `C` / `c` | Elbow up / down | | |
 
-`T`/`t` were already sent by the glove sketch (commented "thumb 1 - Base Rotation") but the original arm sketch ignored them. The original phone commands `S`/`O` are kept as aliases of `T`/`t`; `robotic_glove_code.ino` is unchanged. Each command moves the base by `servo_base_pos_increment` units, clamped to the limits.
+`T`/`t` were already sent by the glove sketch (commented "thumb 1 - Base Rotation") but the original arm sketch ignored them. The original phone commands `S`/`O` are kept as aliases of `T`/`t`; `robotic_glove_code.ino` is unchanged. Each command moves the base by `servo_base_pos_increment` microseconds, clamped to the limits.
+
+## 11a. Units / migration from the old servo library
+
+The firmware now uses the **Adafruit PWM Servo Driver Library** (`Adafruit_PWMServoDriver`). All positions are **pulse widths in microseconds**.
+
+The previous Hobby Components PCA9685 library's `Servo(ch, pos)` behaviour was read from the library source (v0.1, third-party GitHub copy `dray-hw/robot-arm`; the Hobby Components forum is not reachable, so this copy is not confirmed identical to the original download):
+
+- `Init(SERVO_MODE)` set the prescaler for 50 Hz: `(25 MHz / (4096 * 50)) - 1 = 121` (integer maths), i.e. a real period of 122 * 4096 / 25 MHz = 19.99 ms (50.03 Hz).
+- `Servo(ch, pos)` wrote OFF-tick = `min(pos + 110, 590)` (ON-tick 0). `SERVO_TRIM_MIN = 110`, `SERVO_TRIM_MAX = 590`.
+- So pulse = `(pos + 110) * 4.88 us`, one old unit = one PCA9685 tick = about 4.88 us:
+
+| Old pos | Ticks | Pulse |
+|---|---|---|
+| 0 | 110 | ~537 us |
+| 10 | 120 | ~586 us |
+| 240 | 350 | ~1708 us |
+| 400 | 510 | ~2489 us |
+| 480 | 590 | ~2879 us |
+
+This assumes a nominal 25 MHz oscillator. The pulse widths are exact for that assumption and say nothing about the real servo travel. Old values were never calibrated to angles. The old range reached ~2.9 ms, beyond the 1000-2000 us envelope now in force, so converted limits are **clipped** to it: base 140-340 became 1220-2196, clipped to 1220-2000 us. Old parking for elbow, wrist 1, wrist 2 and gripper converted to 830 / 766 / 844 / 844 us, below 1000 us, so they are clamped to 1000 us.
+
+Configuration at the top of `arduino_robot_arm_code.ino`:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `SERVO_FREQ_HZ` | 50 | PWM frequency |
+| `OSC_FREQ_HZ` | 25000000 | nominal oscillator. Real chips vary a few percent. To calibrate: measure the output period T with a scope/logic analyser and set `OSC_FREQ_HZ = 25000000 * 0.020 / T` |
+| `SERVO_MIN_US` / `SERVO_MAX_US` | 1000 / 2000 | global test envelope; every pulse is clamped to it |
+| `joint_enabled[6]` | base only | a disabled joint gets no pulse and ignores its commands |
+| `servo_*_min_pos` / `_max_pos` | see sketch | per-joint limits (us) |
+| `servo_*_pos_increment` | old increment * 4.88 | us per command |
+
+Enable joints one at a time, and only after calibrating that joint.
 
 ## 11. MG995 calibration
 
-The HCPCA9685 `Servo()` call takes a **position value (0-480), not degrees**. The real library source was not available when this was written, so the exact value → pulse-width mapping is unverified. Calibrate empirically:
+Positions are **pulse widths in microseconds, not degrees**. The calibration sketch works on one channel at a time (default CH0; press `0`-`5` to select another). Only the selected channel is ever pulsed. Calibrate empirically:
 
 1. Remove the servo horn / free the base so nothing can jam. Disconnect the HC-05 from D0/D1.
 2. Power the external supply, upload `code/test-code/mg995_base_calibration`, open Serial Monitor at 9600 baud (no line ending).
-3. The servo starts at 240. Press `d`/`a` (±10) or `w`/`s` (±1) to creep toward each end. Stop and back off ~10 units when the servo hums or reaches its stop.
+3. No pulse is sent until you press a move key or `c` (centre = 1500 us). Press `d`/`a` (±10 us) or `w`/`s` (±1 us) to creep toward each end; the sketch clamps to 1000-2000 us (`CAL_MIN_US`/`CAL_MAX_US`; widen only deliberately). Stop and back off ~20 us when the servo hums or reaches its stop. `x` makes the channel limp.
 4. Note the **min**, **max** and the value that points the base straight ahead.
 5. Edit these in `arduino_robot_arm_code.ino`:
 
 | Setting | Default (uncalibrated) | Meaning |
 |---|---|---|
-| `servo_base_parking_pos` | 240 | startup position |
-| `servo_base_min_pos` / `servo_base_max_pos` | 140 / 340 | software limits |
-| `servo_base_pos_increment` | 10 | units per command |
-| `servo_base_step_delay` | 5 | ms per unit (higher = slower) |
+| `servo_base_parking_pos` | 1708 us | startup position |
+| `servo_base_min_pos` / `servo_base_max_pos` | 1220 / 2000 us | software limits |
+| `servo_base_pos_increment` | 49 us | per command |
+| `servo_base_step_us` | 5 us | ramp step size |
+| `servo_base_step_delay` | 5 | ms per ramp step (higher = slower) |
 | `servo_base_left_direction` | +1 | set −1 if `T`/`S` turns the wrong way |
 
 The firmware clamps every base move to min/max, and the startup position to the limits too.
 
 ## 12. Upload instructions
 
-1. Install the **HCPCA9685** library (Hobby Components) in the Arduino IDE.
+1. In the Arduino IDE open Library Manager and install **Adafruit PWM Servo Driver Library** (accept Adafruit BusIO).
 2. **Disconnect the HC-05 from D0/D1** (it shares the USB serial lines) before uploading.
 3. Select *Arduino Uno*, open `code/arduino_robot_arm_code/arduino_robot_arm_code.ino`, upload.
 4. Reconnect the HC-05, power the servo supply, pair the HC-05 and send commands.
 
-At power-up the base servo moves to `servo_base_parking_pos`; with no position feedback it can jump from wherever it was. Keep clear of the arm and power the servo supply with the arm in a safe pose. The other joints behave as in the original (they move on their first command).
+At power-up the base servo moves to `servo_base_parking_pos`; with no position feedback it can jump from wherever it was. Keep clear of the arm and power the servo supply with the arm in a safe pose. The other five joints are **disabled** (no pulse, commands ignored; at startup every disabled channel is forced to full-OFF, so a stale pulse from before an Arduino-only reset is cancelled) until you set their `joint_enabled` entry to `true` after calibrating them.
 
 ## 13. Safety
 
-- **Startup is open-loop.** On power-up the base jumps from wherever the horn physically is to `servo_base_parking_pos` (default 240, uncalibrated) at full speed; there is no position feedback, and the step-by-step ramp only applies to later moves. Keep the horn off / the arm clear on first power-up.
-- **Every servo write is clamped** to that joint's configured min/max (no overshoot, no negative-to-unsigned wrap). If any limit pair is invalid (needs `0 <= min < max`) the sketch sends no servo pulse and halts with an error on Serial.
+- **Startup is open-loop.** On power-up the base jumps from wherever the horn physically is to `servo_base_parking_pos` (default 1708 us, uncalibrated) at full speed; there is no position feedback, and the step-by-step ramp only applies to later moves. Keep the horn off / the arm clear on first power-up.
+- **Every servo write is clamped** to that joint's configured min/max (no overshoot, no negative-to-unsigned wrap). If any limit pair is invalid (needs `1000 <= min < max <= 2000`, and the base parking inside its limits) the sketch sends no servo pulse and halts with an error on Serial.
 
 - Keep fingers and cables out of the arm's reach when powering on.
 - Use a supply with current limiting or a fuse; a stalled MG995 can draw 1 A or more.

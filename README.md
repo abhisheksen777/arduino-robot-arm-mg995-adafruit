@@ -32,6 +32,6 @@ Glove commands: `T`/`t` base (`S`/`O` kept as phone aliases), `P`/`p` shoulder, 
 - Wiring, power, voltage divider, commands, calibration and safety: [HARDWARE_WIRING.md](HARDWARE_WIRING.md)
 - Wiring overview: [block-diagrams/mg995-base-servo-wiring.svg](block-diagrams/mg995-base-servo-wiring.svg)
 - Calibration sketch: `code/test-code/mg995_base_calibration`
-- Requires the HCPCA9685 library. The original Fritzing diagrams in `block-diagrams/` still show the old stepper build.
+- Requires the **Adafruit PWM Servo Driver Library** (Arduino Library Manager; also installs Adafruit BusIO). All servo positions are pulse widths in microseconds; see "Units / migration" in HARDWARE_WIRING.md. Only the base joint is enabled by default until each joint is calibrated. The original Fritzing diagrams in `block-diagrams/` still show the old stepper build.
 
 Original project and credits above are by Smartbuilds.io (EbenKouao/arduino-robot-arm).
